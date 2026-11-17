@@ -1,59 +1,75 @@
 
-import 'package:sqflite/sqflite.dart';
-import 'package:path/path.dart';
+import 'dart:convert';
+
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/product.dart';
 
 class DatabaseService {
-  static Database? _database;
+  static const String _favoritesKey = 'favorites';
+  static const String _cartKey = 'cart';
 
-  static Future<Database> get database async {
-    if (_database != null) {
-      return _database!;
+  // ==============================
+  // DATABASE FAVORITES
+  // ==============================
+
+  static Future<List<Product>> getFavorites() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    final String? data = prefs.getString(_favoritesKey);
+
+    if (data == null || data.isEmpty) {
+      return [];
     }
 
-    final dbPath = await getDatabasesPath();
-    final path = join(dbPath, 'online_shop.db');
+    final List<dynamic> decoded = jsonDecode(data);
 
-    _database = await openDatabase(
-      path,
-      version: 1,
-      onCreate: (db, version) async {
-        await db.execute('''
-          CREATE TABLE favorites (
-            id INTEGER PRIMARY KEY,
-            title TEXT,
-            description TEXT,
-            category TEXT,
-            price REAL,
-            rating REAL,
-            stock INTEGER,
-            thumbnail TEXT,
-            images TEXT
-          )
-        ''');
-
-        await db.execute('''
-          CREATE TABLE cart (
-            id INTEGER PRIMARY KEY,
-            title TEXT,
-            price REAL,
-            thumbnail TEXT,
-            quantity INTEGER
-          )
-        ''');
-      },
-    );
-
-    return _database!;
+    return decoded.map((item) {
+      return Product.fromJson(
+        Map<String, dynamic>.from(item),
+      );
+    }).toList();
   }
 
   static Future<void> addFavorite(Product product) async {
-    final db = await database;
+    final favorites = await getFavorites();
 
-    await db.insert(
-      'favorites',
-      {
+    final exists = favorites.any(
+      (item) => item.id == product.id,
+    );
+
+    if (!exists) {
+      favorites.add(product);
+    }
+
+    await _saveFavorites(favorites);
+  }
+
+  static Future<void> removeFavorite(int id) async {
+    final favorites = await getFavorites();
+
+    favorites.removeWhere(
+      (product) => product.id == id,
+    );
+
+    await _saveFavorites(favorites);
+  }
+
+  static Future<bool> isFavorite(int id) async {
+    final favorites = await getFavorites();
+
+    return favorites.any(
+      (product) => product.id == id,
+    );
+  }
+
+  static Future<void> _saveFavorites(
+    List<Product> favorites,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+
+    final data = favorites.map((product) {
+      return {
         'id': product.id,
         'title': product.title,
         'description': product.description,
@@ -62,76 +78,49 @@ class DatabaseService {
         'rating': product.rating,
         'stock': product.stock,
         'thumbnail': product.thumbnail,
-        'images': product.images.join('|'),
-      },
-      conflictAlgorithm: ConflictAlgorithm.replace,
+        'images': product.images,
+      };
+    }).toList();
+
+    await prefs.setString(
+      _favoritesKey,
+      jsonEncode(data),
     );
   }
 
-  static Future<List<Product>> getFavorites() async {
-    final db = await database;
-    final data = await db.query('favorites');
+  // ==============================
+  // DATABASE CART
+  // ==============================
 
-    return data.map((item) {
-      return Product(
-        id: item['id'] as int,
-        title: item['title'] as String,
-        description: item['description'] as String,
-        category: item['category'] as String,
-        price: (item['price'] as num).toDouble(),
-        rating: (item['rating'] as num).toDouble(),
-        stock: item['stock'] as int,
-        thumbnail: item['thumbnail'] as String,
-        images: (item['images'] as String)
-            .split('|')
-            .where((image) => image.isNotEmpty)
-            .toList(),
-      );
+  static Future<List<Map<String, dynamic>>> getCart() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    final String? data = prefs.getString(_cartKey);
+
+    if (data == null || data.isEmpty) {
+      return [];
+    }
+
+    final List<dynamic> decoded = jsonDecode(data);
+
+    return decoded.map((item) {
+      return Map<String, dynamic>.from(item);
     }).toList();
   }
 
-  static Future<bool> isFavorite(int id) async {
-    final db = await database;
-
-    final result = await db.query(
-      'favorites',
-      where: 'id = ?',
-      whereArgs: [id],
-    );
-
-    return result.isNotEmpty;
-  }
-
-  static Future<void> removeFavorite(int id) async {
-    final db = await database;
-
-    await db.delete(
-      'favorites',
-      where: 'id = ?',
-      whereArgs: [id],
-    );
-  }
-
   static Future<void> addToCart(Product product) async {
-    final db = await database;
+    final cart = await getCart();
 
-    final result = await db.query(
-      'cart',
-      where: 'id = ?',
-      whereArgs: [product.id],
+    final index = cart.indexWhere(
+      (item) => item['id'] == product.id,
     );
 
-    if (result.isNotEmpty) {
-      final quantity = result.first['quantity'] as int;
+    if (index != -1) {
+      final quantity = cart[index]['quantity'] as int;
 
-      await db.update(
-        'cart',
-        {'quantity': quantity + 1},
-        where: 'id = ?',
-        whereArgs: [product.id],
-      );
+      cart[index]['quantity'] = quantity + 1;
     } else {
-      await db.insert('cart', {
+      cart.add({
         'id': product.id,
         'title': product.title,
         'price': product.price,
@@ -139,39 +128,49 @@ class DatabaseService {
         'quantity': 1,
       });
     }
-  }
 
-  static Future<List<Map<String, dynamic>>> getCart() async {
-    final db = await database;
-    return db.query('cart');
+    await _saveCart(cart);
   }
 
   static Future<void> updateCartQuantity(
     int id,
     int quantity,
   ) async {
-    final db = await database;
+    final cart = await getCart();
+
+    final index = cart.indexWhere(
+      (item) => item['id'] == id,
+    );
+
+    if (index == -1) return;
 
     if (quantity <= 0) {
-      await removeFromCart(id);
-      return;
+      cart.removeAt(index);
+    } else {
+      cart[index]['quantity'] = quantity;
     }
 
-    await db.update(
-      'cart',
-      {'quantity': quantity},
-      where: 'id = ?',
-      whereArgs: [id],
-    );
+    await _saveCart(cart);
   }
 
   static Future<void> removeFromCart(int id) async {
-    final db = await database;
+    final cart = await getCart();
 
-    await db.delete(
-      'cart',
-      where: 'id = ?',
-      whereArgs: [id],
+    cart.removeWhere(
+      (item) => item['id'] == id,
+    );
+
+    await _saveCart(cart);
+  }
+
+  static Future<void> _saveCart(
+    List<Map<String, dynamic>> cart,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+
+    await prefs.setString(
+      _cartKey,
+      jsonEncode(cart),
     );
   }
 }
